@@ -47,6 +47,7 @@ namespace PADPlus {
 
         System.Timers.Timer controllerCheck;
         private readonly object _scanLock = new object();
+        private readonly HashSet<string> _manuallyDisconnectedPaths = new(StringComparer.OrdinalIgnoreCase);
         private long _lastConnectTick = 0;
         public long LastConnectTick => _lastConnectTick;
 
@@ -83,6 +84,7 @@ namespace PADPlus {
                             joycon.other.other = null; // The other of the other is the joycon itself
 
                         joycon.Detach(true);
+                        HidHideService.UnhideDevice(joycon.path);
                         rem.Add(joycon);
 
                         foreach (Button b in form.con) {
@@ -92,6 +94,7 @@ namespace PADPlus {
                                     b.Enabled = false;
                                     b.Text = "";
                                     b.BackgroundImage = ControllerIconHelper.GetIcon("empty");
+                                    form.SetDisconnectButtonVisible(b, false);
                                 }));
                                 break;
                             }
@@ -106,6 +109,21 @@ namespace PADPlus {
             } finally {
                 Monitor.Exit(_scanLock);
             }
+        }
+
+        public bool DisconnectController(Joycon joycon) {
+            if (joycon == null) return false;
+
+            lock (_scanLock) {
+                if (!j.Any(v => ReferenceEquals(v, joycon))) return false;
+
+                _manuallyDisconnectedPaths.Add(joycon.path);
+                if (joycon.state != Joycon.state_.DROPPED)
+                    joycon.state = Joycon.state_.DROPPED;
+            }
+
+            CleanUp();
+            return true;
         }
 
         void CheckForNewControllersTime(Object source, ElapsedEventArgs e) {
@@ -142,12 +160,15 @@ namespace PADPlus {
                 bool isLeft = false;
                 IntPtr ptr = HIDapi.hid_enumerate(0x0, 0x0);
                 IntPtr top_ptr = ptr;
+                HashSet<string> enumeratedPaths = new(StringComparer.OrdinalIgnoreCase);
 
                 hid_device_info enumerate; // Add device to list
                 bool foundNew = false;
                 while (ptr != IntPtr.Zero) {
                     SController thirdParty = null;
                     enumerate = (hid_device_info)Marshal.PtrToStructure(ptr, typeof(hid_device_info));
+                    if (!string.IsNullOrEmpty(enumerate.path))
+                        enumeratedPaths.Add(enumerate.path);
 
                     string serial = enumerate.serial_number;
                     if (string.IsNullOrEmpty(serial)) {
@@ -177,6 +198,28 @@ namespace PADPlus {
                     ushort prod_id = thirdParty == null ? enumerate.product_id : TypeToProdId(thirdParty.type);
                     if (prod_id == 0) {
                         ptr = enumerate.next; // controller was not assigned a type, but advance ptr anyway
+                        continue;
+                    }
+
+                    if (_manuallyDisconnectedPaths.Contains(enumerate.path)) {
+                        bool deviceSleeping = false;
+                        if (thirdParty == null && serial != "000000000001") {
+                            IntPtr probeHandle = HIDapi.hid_open_path(enumerate.path);
+                            if (probeHandle != IntPtr.Zero) {
+                                deviceSleeping = !ProbeDeviceAwake(probeHandle);
+                                HIDapi.hid_close(probeHandle);
+                            }
+                        }
+
+                        if (deviceSleeping) {
+                            _manuallyDisconnectedPaths.Remove(enumerate.path);
+                        } else {
+                            ptr = enumerate.next;
+                            continue;
+                        }
+
+                        // Let the next scan reopen a Bluetooth controller that was powered off.
+                        ptr = enumerate.next;
                         continue;
                     }
 
@@ -311,6 +354,7 @@ namespace PADPlus {
                                         v.Tag = j.Last(); // assign controller to button
                                         v.Enabled = true;
                                         v.BackgroundImage = temp;
+                                    form.SetDisconnectButtonVisible(v, true);
                                     }));
 
                                     form.loc[ii].Invoke(new MethodInvoker(delegate {
@@ -380,6 +424,7 @@ namespace PADPlus {
                     }
                 }
 
+                _manuallyDisconnectedPaths.RemoveWhere(path => !enumeratedPaths.Contains(path));
                 HIDapi.hid_free_enumeration(top_ptr);
 
                 bool on = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None).AppSettings.Settings["HomeLEDOn"].Value.ToLower() == "true";
@@ -495,12 +540,7 @@ namespace PADPlus {
         }
 
         private static void Mouse_MouseEvent(object sender, WindowsInput.Events.Sources.EventSourceEventArgs<WindowsInput.Events.Sources.MouseEvent> e) {
-            if (MainForm.ActiveMapButton != null && e.Data.ButtonDown != null) {
-                var btn = MainForm.ActiveMapButton;
-                MainForm.ActiveMapButton = null;
-                Config.SetValue((string)btn.Tag, "mse_" + ((int)e.Data.ButtonDown.Button));
-                Config.Save();
-                form?.BeginInvoke(new Action(() => MainForm.UpdateMapButtonLabel(btn)));
+            if (e.Data.ButtonDown != null && MainForm.TryCaptureMapping("mse_" + ((int)e.Data.ButtonDown.Button))) {
                 e.Next_Hook_Enabled = false;
                 return;
             }
@@ -509,7 +549,9 @@ namespace PADPlus {
                 string res_val = Config.Value("reset_mouse");
                 if (res_val.StartsWith("mse_"))
                     if ((int)e.Data.ButtonDown.Button == Int32.Parse(res_val.Substring(4)))
-                        WindowsInput.Simulate.Events().MoveTo(Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Height / 2).Invoke();
+                        WindowsInput.Simulate.Events().MoveTo(
+                            Screen.PrimaryScreen.Bounds.Left + Screen.PrimaryScreen.Bounds.Width / 2,
+                            Screen.PrimaryScreen.Bounds.Top + Screen.PrimaryScreen.Bounds.Height / 2).Invoke();
 
                 res_val = Config.Value("active_gyro");
                 if (res_val.StartsWith("mse_"))
@@ -528,12 +570,7 @@ namespace PADPlus {
         }
 
         private static void Keyboard_KeyEvent(object sender, WindowsInput.Events.Sources.EventSourceEventArgs<WindowsInput.Events.Sources.KeyboardEvent> e) {
-            if (MainForm.ActiveMapButton != null && e.Data.KeyDown != null) {
-                var btn = MainForm.ActiveMapButton;
-                MainForm.ActiveMapButton = null;
-                Config.SetValue((string)btn.Tag, "key_" + ((int)e.Data.KeyDown.Key));
-                Config.Save();
-                form?.BeginInvoke(new Action(() => MainForm.UpdateMapButtonLabel(btn)));
+            if (e.Data.KeyDown != null && MainForm.TryCaptureMapping("key_" + ((int)e.Data.KeyDown.Key))) {
                 e.Next_Hook_Enabled = false;
                 return;
             }
@@ -542,7 +579,9 @@ namespace PADPlus {
                 string res_val = Config.Value("reset_mouse");
                 if (res_val.StartsWith("key_"))
                     if ((int)e.Data.KeyDown.Key == Int32.Parse(res_val.Substring(4)))
-                        WindowsInput.Simulate.Events().MoveTo(Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Height / 2).Invoke();
+                        WindowsInput.Simulate.Events().MoveTo(
+                            Screen.PrimaryScreen.Bounds.Left + Screen.PrimaryScreen.Bounds.Width / 2,
+                            Screen.PrimaryScreen.Bounds.Top + Screen.PrimaryScreen.Bounds.Height / 2).Invoke();
 
                 res_val = Config.Value("active_gyro");
                 if (res_val.StartsWith("key_"))

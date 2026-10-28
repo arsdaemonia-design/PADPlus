@@ -21,6 +21,7 @@ namespace PADPlus {
         public bool isSwitch2 = false;
         public bool isGenericDirectInput = false;
         public bool isUSB = false;
+        public bool isThirdPartyController => thirdParty;
         private Joycon _other = null;
 
         // 64 vars
@@ -601,7 +602,7 @@ namespace PADPlus {
                 out_ds4.Disconnect();
             }
 
-            if (state > state_.NO_JOYCONS) {
+            if (state > state_.NO_JOYCONS && !thirdParty && !isGenericDirectInput) {
                 HIDapi.hid_set_nonblocking(handle, 0);
 
                 // Devolver el mando a su estado nativo de Windows / Steam
@@ -808,6 +809,8 @@ namespace PADPlus {
         byte[] sliderVal = new byte[] { 0, 0 };
 
         private void DoThingsWithButtons() {
+            if (CaptureControllerMapping()) return;
+
             int powerOffButton = (int)((isPro || !isLeft || other != null) ? Button.HOME : Button.CAPTURE);
 
             long timestamp = Stopwatch.GetTimestamp();
@@ -955,13 +958,19 @@ namespace PADPlus {
                     WindowsInput.Simulate.Events().MoveBy(dx, dy).Invoke();
                 }
 
-                // reset mouse position to centre of primary monitor
-                res_val = Config.Value("reset_mouse");
-                if (res_val.StartsWith("joy_")) {
-                    int i = Int32.Parse(res_val.Substring(4));
-                    if (buttons_down[i] || (other != null && other.buttons_down[i]))
-                        WindowsInput.Simulate.Events().MoveTo(Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Height / 2).Invoke();
-                }
+            }
+
+            // Mouse recentering is an independent mapped action; it must work in
+            // mouse, joystick, and gyro-disabled modes alike.
+            res_val = Config.Value("reset_mouse");
+            if (res_val.StartsWith("joy_", StringComparison.OrdinalIgnoreCase) &&
+                Int32.TryParse(res_val.Substring(4), out int resetButton) &&
+                resetButton >= 0 && resetButton < buttons_down.Length &&
+                (buttons_down[resetButton] || (other != null && other.buttons_down[resetButton]))) {
+                Rectangle primaryBounds = Screen.PrimaryScreen.Bounds;
+                WindowsInput.Simulate.Events().MoveTo(
+                    primaryBounds.Left + primaryBounds.Width / 2,
+                    primaryBounds.Top + primaryBounds.Height / 2).Invoke();
             }
         }
 
@@ -1239,11 +1248,29 @@ namespace PADPlus {
                 }
             }
 
+            lock (buttons_up) {
+                lock (buttons_down) {
+                    for (int i = 0; i < buttons.Length; ++i) {
+                        buttons_up[i] = down_[i] && !buttons[i];
+                        buttons_down[i] = !down_[i] && buttons[i];
+                    }
+                }
+            }
+            CaptureControllerMapping();
+
             if (out_xbox != null) {
                 try {
                     out_xbox.UpdateInput(MapToXbox360Input(this));
                 } catch { }
             }
+        }
+
+        private bool CaptureControllerMapping() {
+            for (int i = 0; i < buttons_down.Length; ++i) {
+                if (buttons_down[i] && MainForm.TryCaptureMapping("joy_" + i))
+                    return true;
+            }
+            return false;
         }
 
         // Get Gyro/Accel data

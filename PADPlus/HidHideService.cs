@@ -70,6 +70,20 @@ namespace PADPlus {
             }
         }
 
+        public static void UnhideDevice(string hidPath) {
+            if (!IsInstalled || string.IsNullOrWhiteSpace(hidPath)) return;
+
+            string devInstance = FormatDeviceInstanceId(hidPath);
+            if (string.IsNullOrEmpty(devInstance) || !_hiddenDevices.Contains(devInstance)) return;
+
+            if (RunCli($"--dev-unhide \"{devInstance}\"") != null) {
+                _hiddenDevices.Remove(devInstance);
+                OnLog?.Invoke($"[HidHide] Dispositivo devuelto a Windows: {devInstance}");
+            } else {
+                OnLog?.Invoke($"[HidHide] No se pudo restaurar el dispositivo: {devInstance}");
+            }
+        }
+
         public static void UnhideAll() {
             if (!IsInstalled) return;
             if (_unhideCompleted) return;

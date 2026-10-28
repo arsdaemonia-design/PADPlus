@@ -18,7 +18,50 @@ using static PADPlus.HIDapi;
 
 namespace PADPlus {
     public partial class MainForm : Form {
-        public static SplitButton ActiveMapButton = null;
+        private static SplitButton ActiveMapButton = null;
+        private static readonly object MappingCaptureLock = new();
+        private readonly List<Button> disconnectSlotButtons = new();
+
+        public static void ArmMappingCapture(SplitButton button) {
+            lock (MappingCaptureLock) {
+                ActiveMapButton = button;
+            }
+        }
+
+        public static bool TryCaptureMapping(string value) {
+            SplitButton target;
+            lock (MappingCaptureLock) {
+                target = ActiveMapButton;
+                if (target == null) return false;
+                ActiveMapButton = null;
+            }
+
+            if (target.IsDisposed) return false;
+            Action saveMapping = () => {
+                if (target.IsDisposed) return;
+                Config.SetValue((string)target.Tag, value);
+                Config.Save();
+                UpdateMapButtonLabel(target);
+            };
+
+            try {
+                if (target.InvokeRequired) target.BeginInvoke(saveMapping);
+                else saveMapping();
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        private static string GetMappingButtonName(int code) {
+            return (Joycon.Button)code switch {
+                Joycon.Button.SHOULDER_1 => "L (LB)",
+                Joycon.Button.SHOULDER_2 => "ZL (LT)",
+                Joycon.Button.SHOULDER2_1 => "R (RB)",
+                Joycon.Button.SHOULDER2_2 => "ZR (RT)",
+                _ => Enum.GetName(typeof(Joycon.Button), code) ?? ("Botón " + code)
+            };
+        }
 
         public bool allowCalibration = Boolean.Parse(ConfigurationManager.AppSettings["AllowCalibration"]);
         public List<Button> con, loc;
@@ -61,9 +104,38 @@ namespace PADPlus {
 
             for (int i = 0; i < con.Count; i++) {
                 con[i].Click += conBtnClick;
+                con[i].MouseEnter += ControllerSlot_MouseEnter;
+                con[i].MouseLeave += ControllerSlot_MouseLeave;
+                btnTip.SetToolTip(con[i], "Clic para unir/separar Joy-Cons. Pasa el cursor para mostrar × y desconectar de PAD+. Clic derecho para opciones.");
                 con[i].BackgroundImage = ControllerIconHelper.GetIcon("empty");
                 loc[i].Tag = con[i];
                 loc[i].Click += locBtnClickAsync;
+
+                var disconnectButton = new Button {
+                    Text = "X",
+                    Tag = con[i],
+                    Size = new Size(24, 24),
+                    Location = new Point(con[i].Right - 27, con[i].Top + 2),
+                    BackColor = Color.FromArgb(125, 37, 45),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Padding = Padding.Empty,
+                    Cursor = Cursors.Hand,
+                    Visible = false,
+                    TabStop = false
+                };
+                disconnectButton.UseVisualStyleBackColor = false;
+                disconnectButton.FlatAppearance.BorderColor = Color.FromArgb(255, 105, 115);
+                disconnectButton.FlatAppearance.BorderSize = 0;
+                btnTip.SetToolTip(disconnectButton, "Desconectar este mando de PAD+ (no elimina el emparejamiento Bluetooth)");
+                disconnectButton.MouseEnter += DisconnectSlot_MouseEnter;
+                disconnectButton.MouseLeave += DisconnectSlot_MouseLeave;
+                disconnectButton.Click += DisconnectSlotButton_Click;
+                conCntrls.Controls.Add(disconnectButton);
+                disconnectButton.BringToFront();
+                disconnectSlotButtons.Add(disconnectButton);
             }
 
             PopulateSettingsTable();
@@ -84,7 +156,7 @@ namespace PADPlus {
             try {
                 if (val.StartsWith("joy_")) {
                     int code = int.Parse(val.Substring(4));
-                    c.Text = Enum.GetName(typeof(Joycon.Button), code) ?? val;
+                    c.Text = GetMappingButtonName(code);
                 } else if (val.StartsWith("key_")) {
                     int code = int.Parse(val.Substring(4));
                     c.Text = Enum.GetName(typeof(WindowsInput.Events.KeyCode), code) ?? ("Key: " + code);
@@ -214,19 +286,9 @@ namespace PADPlus {
                 settingsTable.Controls.Add(pnlKey, 0, i);
 
                 Control childControl;
-                if (value.Equals("true", StringComparison.OrdinalIgnoreCase) || value.Equals("false", StringComparison.OrdinalIgnoreCase)) {
-                    bool isChecked = Boolean.Parse(value);
-                    var cb = new CheckBox {
-                        Text = isChecked ? "Activado" : "Desactivado",
-                        Checked = isChecked,
-                        ForeColor = isChecked ? Color.FromArgb(0, 230, 118) : Color.FromArgb(176, 190, 197),
-                        Dock = DockStyle.Left,
-                        AutoSize = true,
-                        Font = new Font("Segoe UI", 8.5F, isChecked ? FontStyle.Bold : FontStyle.Regular)
-                    };
-                    cb.CheckedChanged += cbBox_Changed;
-                    childControl = cb;
-                } else if (key.Equals("GyroToJoyOrMouse", StringComparison.OrdinalIgnoreCase)) {
+                // GyroToJoyOrMouse is an enum-like setting whose default is "false".
+                // Handle it before boolean values so it always renders as a mode selector.
+                if (key.Equals("GyroToJoyOrMouse", StringComparison.OrdinalIgnoreCase)) {
                     var cmb = new ComboBox {
                         DropDownStyle = ComboBoxStyle.DropDownList,
                         Dock = DockStyle.Fill,
@@ -241,14 +303,26 @@ namespace PADPlus {
                         "Stick Izquierdo (joy_left)",
                         "Stick Derecho (joy_right)"
                     });
-                    string valLower = value.ToLower();
-                    if (valLower == "mouse") cmb.SelectedIndex = 1;
+                    string valLower = value.Trim().ToLowerInvariant();
+                    if (valLower == "mouse" || valLower == "true") cmb.SelectedIndex = 1;
                     else if (valLower == "joy_left") cmb.SelectedIndex = 2;
                     else if (valLower == "joy_right") cmb.SelectedIndex = 3;
                     else cmb.SelectedIndex = 0;
 
                     cmb.SelectedIndexChanged += cbBox_Changed;
                     childControl = cmb;
+                } else if (value.Equals("true", StringComparison.OrdinalIgnoreCase) || value.Equals("false", StringComparison.OrdinalIgnoreCase)) {
+                    bool isChecked = Boolean.Parse(value);
+                    var cb = new CheckBox {
+                        Text = isChecked ? "Activado" : "Desactivado",
+                        Checked = isChecked,
+                        ForeColor = isChecked ? Color.FromArgb(0, 230, 118) : Color.FromArgb(176, 190, 197),
+                        Dock = DockStyle.Left,
+                        AutoSize = true,
+                        Font = new Font("Segoe UI", 8.5F, isChecked ? FontStyle.Bold : FontStyle.Regular)
+                    };
+                    cb.CheckedChanged += cbBox_Changed;
+                    childControl = cb;
                 } else if (key.Equals("DebugType", StringComparison.OrdinalIgnoreCase)) {
                     var cmb = new ComboBox {
                         DropDownStyle = ComboBoxStyle.DropDownList,
@@ -295,6 +369,7 @@ namespace PADPlus {
         }
 
         private void InitializeMappingView() {
+            grpMapActions.Text = "Mapeo · Switch → Xbox: L/ZL/R/ZR = LB/LT/RB/RT";
             var mappingDefs = new (string label, string key)[] {
                 ("Capturar Pantalla", "capture"),
                 ("Botón Home (Guía)", "home"),
@@ -309,12 +384,12 @@ namespace PADPlus {
 
             ContextMenuStrip menu_joy_buttons = new ContextMenuStrip();
             var noneItem = new ToolStripMenuItem("Ninguno (Desactivar)");
-            noneItem.Tag = 0;
+            noneItem.Tag = -1;
             menu_joy_buttons.Items.Add(noneItem);
             menu_joy_buttons.Items.Add(new ToolStripSeparator());
 
             foreach (int i in Enum.GetValues(typeof(Joycon.Button))) {
-                var temp = new ToolStripMenuItem(Enum.GetName(typeof(Joycon.Button), i));
+                var temp = new ToolStripMenuItem(GetMappingButtonName(i));
                 temp.Tag = i;
                 menu_joy_buttons.Items.Add(temp);
             }
@@ -322,7 +397,7 @@ namespace PADPlus {
             menu_joy_buttons.ItemClicked += (sender, e) => {
                 if (menu_joy_buttons.Tag is SplitButton caller && e.ClickedItem != null) {
                     if (e.ClickedItem.Tag is int tagVal) {
-                        Config.SetValue((string)caller.Tag, tagVal == 0 ? "0" : ("joy_" + tagVal));
+                        Config.SetValue((string)caller.Tag, tagVal < 0 ? "0" : ("joy_" + tagVal));
                         Config.Save();
                         UpdateMapButtonLabel(caller);
                     }
@@ -361,15 +436,16 @@ namespace PADPlus {
                 };
                 btn.FlatAppearance.BorderColor = Color.FromArgb(65, 70, 82);
 
-                btnTip.SetToolTip(btn, "Clic izquierdo: presiona una tecla o clic para capturar.\r\nClic central: restablecer por defecto.\r\nFlecha derecha: desplegar lista de botones del mando.");
+                btnTip.SetToolTip(btn, "Clic izquierdo: arma la captura; luego presiona una tecla, clic o botón del mando.\r\nClic central: restablecer por defecto.\r\nFlecha derecha: elegir un botón del mando.");
 
                 btn.MouseDown += (s, e) => {
                     var b = s as SplitButton;
                     if (b == null) return;
                     if (e.Button == MouseButtons.Left) {
-                        ActiveMapButton = b;
-                        b.Text = "Presiona tecla/clic...";
+                        ArmMappingCapture(b);
+                        b.Text = "Presiona tecla/clic/botón...";
                     } else if (e.Button == MouseButtons.Middle) {
+                        ArmMappingCapture(null);
                         Config.SetValue((string)b.Tag, Config.GetDefaultValue((string)b.Tag));
                         Config.Save();
                         UpdateMapButtonLabel(b);
@@ -514,6 +590,19 @@ namespace PADPlus {
 
         private void MainForm_Load(object sender, EventArgs e) {
             Config.Init(caliData);
+
+            // Older builds exposed GyroToJoyOrMouse="true" as a checkbox by mistake.
+            // Preserve the user's intent to enable gyro aiming by migrating it to mouse mode.
+            if (string.Equals(ConfigurationManager.AppSettings["GyroToJoyOrMouse"], "true", StringComparison.OrdinalIgnoreCase)) {
+                var configFile = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
+                var gyroSetting = configFile.AppSettings.Settings["GyroToJoyOrMouse"];
+                if (gyroSetting != null) {
+                    gyroSetting.Value = "mouse";
+                    configFile.Save(ConfigurationSaveMode.Modified);
+                    ConfigurationManager.RefreshSection("appSettings");
+                    AppendTextBox("Configuración anterior de giroscopio migrada a Ratón.\r\n");
+                }
+            }
 
             BluetoothAutoPairService.OnLog += (msg) => AppendTextBox(msg + "\r\n");
 
@@ -769,6 +858,80 @@ namespace PADPlus {
         }
 
         bool doNotRejoin = Boolean.Parse(ConfigurationManager.AppSettings["DoNotRejoinJoycons"]);
+
+        public void SetDisconnectButtonVisible(Button slot, bool visible) {
+            int index = con.IndexOf(slot);
+            if (index < 0 || index >= disconnectSlotButtons.Count) return;
+            var disconnectButton = disconnectSlotButtons[index];
+            bool showOnHover = visible && IsPointerOverSlot(slot);
+            if (disconnectButton.InvokeRequired) {
+                disconnectButton.BeginInvoke(new Action(() => {
+                    disconnectButton.Enabled = visible;
+                    disconnectButton.Visible = showOnHover;
+                }));
+            } else {
+                disconnectButton.Enabled = visible;
+                disconnectButton.Visible = showOnHover;
+            }
+        }
+
+        private bool IsPointerOverSlot(Button slot) =>
+            slot != null && !slot.IsDisposed && slot.ClientRectangle.Contains(slot.PointToClient(Cursor.Position));
+
+        private void UpdateDisconnectButtonHover(Button slot) {
+            int index = con.IndexOf(slot);
+            if (index < 0 || index >= disconnectSlotButtons.Count) return;
+            var disconnectButton = disconnectSlotButtons[index];
+            bool hovered = IsPointerOverSlot(slot);
+            disconnectButton.Visible = disconnectButton.Enabled && hovered;
+            if (!hovered) {
+                disconnectButton.BackColor = Color.FromArgb(125, 37, 45);
+                disconnectButton.FlatAppearance.BorderColor = Color.FromArgb(255, 105, 115);
+            }
+        }
+
+        private void ControllerSlot_MouseEnter(object sender, EventArgs e) {
+            if (sender is Button slot) UpdateDisconnectButtonHover(slot);
+        }
+
+        private void ControllerSlot_MouseLeave(object sender, EventArgs e) {
+            if (sender is Button slot) UpdateDisconnectButtonHover(slot);
+        }
+
+        private void DisconnectSlot_MouseEnter(object sender, EventArgs e) {
+            if (sender is Button disconnectButton && disconnectButton.Tag is Button slot) {
+                disconnectButton.BackColor = Color.FromArgb(150, 48, 56);
+                disconnectButton.FlatAppearance.BorderColor = Color.FromArgb(255, 105, 115);
+            }
+        }
+
+        private void DisconnectSlot_MouseLeave(object sender, EventArgs e) {
+            if (sender is Button disconnectButton && disconnectButton.Tag is Button slot)
+                UpdateDisconnectButtonHover(slot);
+        }
+
+        private async void DisconnectSlotButton_Click(object sender, EventArgs e) {
+            if (sender is not Button disconnectButton || disconnectButton.Tag is not Button slot || slot.Tag is not Joycon joycon)
+                return;
+
+            // Split a joined Joy-Con pair first so the remaining controller keeps its own XInput pad.
+            if (!joycon.isPro && joycon.other != null)
+                conBtnClick(slot, EventArgs.Empty);
+
+            disconnectButton.Enabled = false;
+            string controllerLabel = joycon.isGenericDirectInput ? "mando DirectInput" : "mando";
+            AppendTextBox($"Desconectando {controllerLabel} de PAD+...\r\n");
+            try {
+                bool disconnected = await Task.Run(() => Program.mgr?.DisconnectController(joycon) ?? false);
+                if (!disconnected && !disconnectButton.IsDisposed) {
+                    disconnectButton.Enabled = true;
+                    AppendTextBox("No se pudo desconectar el mando; vuelve a intentarlo.\r\n");
+                }
+            } catch (Exception ex) {
+                if (!disconnectButton.IsDisposed) disconnectButton.Enabled = true;
+                AppendTextBox("Error al desconectar el mando: " + ex.Message + "\r\n");
+            }
+        }
 
         public void conBtnClick(object sender, EventArgs e) {
             Button button = sender as Button;
