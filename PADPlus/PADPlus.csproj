@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>PADPlus</RootNamespace>
+    <AssemblyName>PAD+</AssemblyName>
+    <ApplicationIcon>Icons\padplus_icon.ico</ApplicationIcon>
+    <ApplicationManifest>Properties\app.manifest</ApplicationManifest>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>PAD+</Product>
+    <AssemblyTitle>PAD+ Switch Controller Bridge for PC</AssemblyTitle>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Version>1.0.0</Version>
+    <Platforms>x64;x86</Platforms>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <PlatformTarget>$(Platform)</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
+    <PackageReference Include="JetBrains.Annotations" Version="2020.1.0" />
+    <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="8.0.1" />
+    <PackageReference Include="WindowsInput" Version="6.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="3rdPartyControllers.resx" DependentUpon="3rdPartyControllers.cs" />
+    <EmbeddedResource Update="MainForm.resx" DependentUpon="MainForm.cs" />
+    <EmbeddedResource Update="Reassign.resx" DependentUpon="Reassign.cs" />
+    <EmbeddedResource Update="Properties\Resources.resx" Generator="ResXFileCodeGenerator" LastGenOutput="Resources.Designer.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="! Install the drivers in the Drivers folder" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Drivers\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Icons\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="CopyHidapi" AfterTargets="Build" Condition="'$(Platform)' == 'x64' or '$(Platform)' == 'x86'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\$(Platform)\hidapi.dll" DestinationFiles="$(OutDir)hidapi.dll" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
